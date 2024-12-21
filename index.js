@@ -1,37 +1,39 @@
 const express = require("express");
-const https = require("https");
-const fs = require("fs");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
-const path = require("path");
 const http = require("http");
-// Environment variables (should be in .env file)
+
+// Environment variables
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
-const NODE_ENV = process.env.NODE_ENV || "development";
+const NODE_ENV = process.env.NODE_ENV || "production";
 
 // Initialize Express app
 const app = express();
-const helmetConfig = {
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      connectSrc: ["'self'", "wss:", "https:"],
-      mediaSrc: ["'self'", "https:", "blob:"],
-      imgSrc: ["'self'", "data:", "blob:"],
-      workerSrc: ["'self'", "blob:"],
-    },
-  },
-  crossOriginEmbedderPolicy: false, // Required for WebRTC
-  crossOriginOpenerPolicy: false,
-  crossOriginResourcePolicy: false,
-};
+const server = http.createServer(app);
+
 // Security middleware
-app.use(helmet());
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        connectSrc: ["'self'", "wss:", "https:"],
+        mediaSrc: ["'self'", "https:", "blob:"],
+        imgSrc: ["'self'", "data:", "blob:"],
+        workerSrc: ["'self'", "blob:"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: false,
+    crossOriginResourcePolicy: false,
+  })
+);
+
 const corsOptions = {
-  origin: true, // This allows any origin in development
+  origin: CORS_ORIGIN,
   methods: ["GET", "POST"],
   credentials: true,
   allowedHeaders: ["Content-Type", "Authorization"],
@@ -39,46 +41,15 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// const sslOptions = {
-//   key: fs.readFileSync(path.join(__dirname, "certificates", "key.pem")),
-//   cert: fs.readFileSync(path.join(__dirname, "certificates", "cert.pem")),
-// };
-let server;
-if (NODE_ENV === "production") {
-  const sslOptions = {
-    key: fs.readFileSync(path.join(__dirname, "certificates", "key.pem")),
-    cert: fs.readFileSync(path.join(__dirname, "certificates", "cert.pem")),
-    ciphers: [
-      "ECDHE-ECDSA-AES128-GCM-SHA256",
-      "ECDHE-RSA-AES128-GCM-SHA256",
-      "ECDHE-ECDSA-AES256-GCM-SHA384",
-      "ECDHE-RSA-AES256-GCM-SHA384",
-    ].join(":"),
-    honorCipherOrder: true,
-    minVersion: "TLSv1.2",
-  };
-  server = https.createServer(sslOptions, app);
-} else {
-  server = http.createServer(app);
-}
-
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
 });
 app.use(limiter);
 
-// Create HTTP server
-// const server = https.createServer(sslOptions, app);
-
 const io = new Server(server, {
-  cors: {
-    origin: true,
-    methods: ["GET", "POST"],
-    credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization"],
-  },
+  cors: corsOptions,
   pingTimeout: 60000,
   pingInterval: 25000,
   transports: ["websocket", "polling"],
@@ -86,17 +57,18 @@ const io = new Server(server, {
   upgradeTimeout: 10000,
   maxHttpBufferSize: 1e6,
   perMessageDeflate: {
-    threshold: 1024, // Only compress data above 1KB
+    threshold: 1024,
   },
   path: "/socket.io/",
 });
+
 // Data structures for managing connections
 class ConnectionManager {
   constructor() {
-    this.users = new Map(); // Maps socket.id to user info
-    this.partnerships = new Map(); // Maps socket.id to partner's socket.id
-    this.waitingQueue = []; // Array of socket.ids waiting for partners
-    this.roomCounter = 0; // Counter for generating unique room IDs
+    this.users = new Map();
+    this.partnerships = new Map();
+    this.waitingQueue = [];
+    this.roomCounter = 0;
   }
 
   addUser(socketId) {
@@ -200,8 +172,10 @@ const connectionManager = new ConnectionManager();
 
 // Logging middleware
 const logEvent = (event, socketId, data = {}) => {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${event} | Socket: ${socketId} | Data:`, data);
+  if (NODE_ENV !== "production") {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${event} | Socket: ${socketId} | Data:`, data);
+  }
 };
 
 // Socket.io event handlers
@@ -373,19 +347,12 @@ io.engine.on("connection_error", (err) => {
 });
 
 // Start server
-server.listen(PORT, "0.0.0.0", () => {
-  const addresses = Object.values(require("os").networkInterfaces())
-    .flat()
-    .filter(({ family, internal }) => family === "IPv4" && !internal)
-    .map(({ address }) => `https://${address}:${PORT}`);
-
+server.listen(PORT, () => {
   console.log(`
 🚀 Server Status:
 - Environment: ${NODE_ENV}
 - Port: ${PORT}
-- HTTPS: Enabled
 - WebSocket: Ready
-- Available at: ${addresses.join(", ")}
   `);
 });
 
