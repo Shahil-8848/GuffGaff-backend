@@ -1,47 +1,32 @@
 const express = require("express");
+const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
-const http = require("http");
 
 // Environment variables
 const PORT = process.env.PORT || 3001;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
+const CORS_ORIGIN = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(",")
+  : ["http://localhost:3000"];
 const NODE_ENV = process.env.NODE_ENV || "production";
-const RATE_LIMIT_WINDOW = process.env.RATE_LIMIT_WINDOW || 15 * 60 * 1000;
-const RATE_LIMIT_MAX = process.env.RATE_LIMIT_MAX || 100;
+const RATE_LIMIT_WINDOW =
+  parseInt(process.env.RATE_LIMIT_WINDOW) || 15 * 60 * 1000;
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 100;
 
 // Initialize Express app
 const app = express();
 const server = http.createServer(app);
 
 // Security middleware
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        connectSrc: ["'self'", "wss:", "https:"],
-        mediaSrc: ["'self'", "https:", "blob:"],
-        imgSrc: ["'self'", "data:", "blob:"],
-        workerSrc: ["'self'", "blob:"],
-      },
-    },
-    crossOriginEmbedderPolicy: false,
-    crossOriginOpenerPolicy: false,
-    crossOriginResourcePolicy: false,
-  })
-);
-
-// Update the trust proxy setting
-app.set("trust proxy", true);
+app.use(helmet());
+app.set("trust proxy", "loopback");
 
 const corsOptions = {
   origin: CORS_ORIGIN,
   methods: ["GET", "POST"],
   credentials: true,
-  allowedHeaders: ["Content-Type", "Authorization"],
 };
 
 app.use(cors(corsOptions));
@@ -52,27 +37,17 @@ const limiter = rateLimit({
   max: RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => NODE_ENV === "development",
-  message: "Too many requests from this IP, please try again later.",
-  trustProxy: true, // Add this line
+  trustProxy: false,
 });
 app.use(limiter);
 
+// Socket.IO setup
 const io = new Server(server, {
   cors: corsOptions,
-  pingTimeout: 60000,
-  pingInterval: 25000,
   transports: ["websocket", "polling"],
-  allowUpgrades: true,
-  upgradeTimeout: 10000,
-  maxHttpBufferSize: 1e6,
-  perMessageDeflate: {
-    threshold: 1024,
-  },
-  path: "/socket.io/",
 });
 
-// Data structures for managing connections
+// Connection Manager
 class ConnectionManager {
   constructor() {
     this.users = new Map();
@@ -86,7 +61,6 @@ class ConnectionManager {
       inCall: false,
       connectedAt: new Date().toISOString(),
       lastActive: new Date().toISOString(),
-      connectionStatus: "online",
       room: null,
     });
   }
@@ -94,11 +68,10 @@ class ConnectionManager {
   removeUser(socketId) {
     const user = this.users.get(socketId);
     if (user && user.room) {
-      this.leaveRoom(socketId, user.room);
+      this.breakPartnership(socketId);
     }
     this.users.delete(socketId);
     this.removeFromWaitingQueue(socketId);
-    return this.breakPartnership(socketId);
   }
 
   addToWaitingQueue(socketId) {
@@ -140,9 +113,14 @@ class ConnectionManager {
     const partnerId = this.partnerships.get(socketId);
     if (partnerId) {
       const partnerUser = this.users.get(partnerId);
+      const user = this.users.get(socketId);
       if (partnerUser) {
         partnerUser.inCall = false;
         partnerUser.room = null;
+      }
+      if (user) {
+        user.inCall = false;
+        user.room = null;
       }
       this.partnerships.delete(partnerId);
       this.partnerships.delete(socketId);
@@ -177,43 +155,24 @@ class ConnectionManager {
   }
 }
 
-// Initialize connection manager
 const connectionManager = new ConnectionManager();
 
 // Logging middleware
 const logEvent = (event, socketId, data = {}) => {
-  if (NODE_ENV !== "production") {
-    const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${event} | Socket: ${socketId} | Data:`, data);
-  }
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${event} | Socket: ${socketId} | Data:`, data);
 };
 
-// Socket.io event handlers
+// Socket.IO event handlers
 io.on("connection", (socket) => {
   logEvent("connection", socket.id);
 
-  // Initialize user
   connectionManager.addUser(socket.id);
-
-  // Send initial connection stats
   io.emit("stats-update", connectionManager.getConnectionStats());
 
-  // Heartbeat mechanism
-  const heartbeatInterval = setInterval(() => {
-    if (connectionManager.users.has(socket.id)) {
-      socket.emit("heartbeat", { timestamp: new Date().toISOString() });
-    }
-  }, 30000);
-
-  socket.on("heartbeat", () => {
-    connectionManager.updateUserActivity(socket.id);
-  });
-
-  // Handle match finding
   socket.on("find-match", () => {
     logEvent("find-match", socket.id);
 
-    // Break existing partnership if any
     const oldPartnerId = connectionManager.breakPartnership(socket.id);
     if (oldPartnerId) {
       io.to(oldPartnerId).emit("partner-left", {
@@ -222,7 +181,6 @@ io.on("connection", (socket) => {
       });
     }
 
-    // Look for waiting partner
     const waitingPartnerId = connectionManager.getNextWaitingUser();
 
     if (waitingPartnerId) {
@@ -231,7 +189,6 @@ io.on("connection", (socket) => {
         waitingPartnerId
       );
 
-      // Notify both users of the match
       const matchData = {
         timestamp: new Date().toISOString(),
         roomId,
@@ -259,13 +216,11 @@ io.on("connection", (socket) => {
     io.emit("stats-update", connectionManager.getConnectionStats());
   });
 
-  // WebRTC signaling handlers
   socket.on("offer", (data) => {
     logEvent("offer", socket.id, { peerId: data.peerId });
     io.to(data.peerId).emit("offer", {
       offer: data.offer,
       peerId: socket.id,
-      timestamp: new Date().toISOString(),
     });
   });
 
@@ -274,7 +229,6 @@ io.on("connection", (socket) => {
     io.to(data.peerId).emit("answer", {
       answer: data.answer,
       peerId: socket.id,
-      timestamp: new Date().toISOString(),
     });
   });
 
@@ -283,16 +237,13 @@ io.on("connection", (socket) => {
     io.to(data.peerId).emit("ice-candidate", {
       candidate: data.candidate,
       peerId: socket.id,
-      timestamp: new Date().toISOString(),
     });
   });
 
-  // Handle disconnection
   socket.on("disconnect", () => {
     logEvent("disconnect", socket.id);
-    clearInterval(heartbeatInterval);
 
-    const partnerId = connectionManager.removeUser(socket.id);
+    const partnerId = connectionManager.breakPartnership(socket.id);
     if (partnerId) {
       io.to(partnerId).emit("partner-left", {
         reason: "Partner disconnected",
@@ -300,59 +251,17 @@ io.on("connection", (socket) => {
       });
     }
 
+    connectionManager.removeUser(socket.id);
     io.emit("stats-update", connectionManager.getConnectionStats());
   });
-
-  // Error handling
-  socket.on("error", (error) => {
-    logEvent("error", socket.id, error);
-    socket.emit("server-error", {
-      message: "An error occurred",
-      timestamp: new Date().toISOString(),
-    });
-  });
 });
 
-// Periodic cleanup of stale connections
-setInterval(() => {
-  const now = new Date();
-  const staleThreshold = 60000; // 1 minute
-
-  connectionManager.users.forEach((user, socketId) => {
-    const lastActive = new Date(user.lastActive);
-    if (now.getTime() - lastActive.getTime() > staleThreshold) {
-      logEvent("stale-connection-cleanup", socketId);
-      const socket = io.sockets.sockets.get(socketId);
-      if (socket) {
-        socket.disconnect(true);
-      } else {
-        connectionManager.removeUser(socketId);
-      }
-    }
-  });
-}, 60000);
-
+// Health check endpoint
 app.get("/health", (req, res) => {
-  res
-    .status(200)
-    .json({ status: "healthy", timestamp: new Date().toISOString() });
-});
-
-// Error handling for the server
-server.on("error", (error) => {
-  console.error("Server error:", error);
-});
-
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("Unhandled Rejection at:", promise, "reason:", reason);
-});
-
-io.engine.on("connection_error", (err) => {
-  console.error("Connection error:", {
-    code: err.code,
-    message: err.message,
-    context: err.context,
+  res.status(200).json({
+    status: "healthy",
     timestamp: new Date().toISOString(),
+    stats: connectionManager.getConnectionStats(),
   });
 });
 
