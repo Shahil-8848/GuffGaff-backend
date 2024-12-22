@@ -9,6 +9,8 @@ const http = require("http");
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const NODE_ENV = process.env.NODE_ENV || "production";
+const RATE_LIMIT_WINDOW = process.env.RATE_LIMIT_WINDOW || 15 * 60 * 1000;
+const RATE_LIMIT_MAX = process.env.RATE_LIMIT_MAX || 100;
 
 // Initialize Express app
 const app = express();
@@ -32,6 +34,9 @@ app.use(
   })
 );
 
+// Update the trust proxy setting
+app.set("trust proxy", true);
+
 const corsOptions = {
   origin: CORS_ORIGIN,
   methods: ["GET", "POST"],
@@ -43,8 +48,13 @@ app.use(cors(corsOptions));
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
+  windowMs: RATE_LIMIT_WINDOW,
+  max: RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => NODE_ENV === "development",
+  message: "Too many requests from this IP, please try again later.",
+  trustProxy: true, // Add this line
 });
 app.use(limiter);
 
