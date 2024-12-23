@@ -45,6 +45,9 @@ app.use(limiter);
 const io = new Server(server, {
   cors: corsOptions,
   transports: ["websocket", "polling"],
+  allowEIO3: true, // Enable compatibility mode
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 // Connection Manager
@@ -231,7 +234,12 @@ io.on("connection", (socket) => {
       peerId: socket.id,
     });
   });
-
+  socket.on("chat-message", (message) => {
+    const partnerId = connectionManager.partnerships.get(socket.id);
+    if (partnerId) {
+      io.to(partnerId).emit("chat-message", message);
+    }
+  });
   socket.on("ice-candidate", (data) => {
     logEvent("ice-candidate", socket.id, { peerId: data.peerId });
     io.to(data.peerId).emit("ice-candidate", {
@@ -264,7 +272,52 @@ app.get("/health", (req, res) => {
     stats: connectionManager.getConnectionStats(),
   });
 });
+// Add this before your server.listen()
+server.on("upgrade", (request, socket, head) => {
+  socket.on("error", (err) => {
+    console.error("Socket upgrade error:", err);
+  });
+});
 
+// Add WebSocket specific logging
+io.engine.on("connection_error", (err) => {
+  console.error("Connection error:", err);
+});
+app.get("/socket-test", (req, res) => {
+  res.send(`
+    <html>
+      <body>
+        <h1>WebSocket Test</h1>
+        <div id="status">Connecting...</div>
+        <script src="/socket.io/socket.io.js"></script>
+        <script>
+          const socket = io({
+            transports: ['websocket'],
+            upgrade: false
+          });
+          
+          socket.on('connect', () => {
+            document.getElementById('status').textContent = 'Connected!';
+          });
+          
+          socket.on('connect_error', (error) => {
+            document.getElementById('status').textContent = 'Error: ' + error;
+          });
+        </script>
+      </body>
+    </html>
+  `);
+});
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept"
+  );
+  res.header("Access-Control-Allow-Credentials", "true");
+  next();
+});
 // Start server
 server.listen(PORT, () => {
   console.log(`
