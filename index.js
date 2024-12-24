@@ -9,7 +9,7 @@ const helmet = require("helmet");
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",")
-  : ["http://localhost:3000"];
+  : ["https://localhost:5173"];
 const NODE_ENV = process.env.NODE_ENV || "production";
 const RATE_LIMIT_WINDOW =
   parseInt(process.env.RATE_LIMIT_WINDOW) || 15 * 60 * 1000;
@@ -20,11 +20,22 @@ const app = express();
 const server = http.createServer(app);
 
 // Security middleware
-app.use(helmet());
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  })
+);
 app.set("trust proxy", "loopback");
 
 const corsOptions = {
-  origin: CORS_ORIGIN,
+  origin: function (origin, callback) {
+    if (!origin || CORS_ORIGIN.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
   methods: ["GET", "POST"],
   credentials: true,
 };
@@ -235,9 +246,14 @@ io.on("connection", (socket) => {
     });
   });
   socket.on("chat-message", (message) => {
+    logEvent("chat-message", socket.id, { message });
     const partnerId = connectionManager.partnerships.get(socket.id);
     if (partnerId) {
-      io.to(partnerId).emit("chat-message", message);
+      io.to(partnerId).emit("chat-message", {
+        text: message.text,
+        sender: socket.id,
+        timestamp: new Date().toISOString(),
+      });
     }
   });
   socket.on("ice-candidate", (data) => {
