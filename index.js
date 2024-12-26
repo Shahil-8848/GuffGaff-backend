@@ -29,13 +29,7 @@ app.use(
 app.set("trust proxy", "loopback");
 
 const corsOptions = {
-  origin: function (origin, callback) {
-    if (!origin || CORS_ORIGIN.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error("Not allowed by CORS"));
-    }
-  },
+  origin: NODE_ENV === "production" ? CORS_ORIGIN : "*",
   methods: ["GET", "POST"],
   credentials: true,
 };
@@ -59,6 +53,7 @@ const io = new Server(server, {
   allowEIO3: true, // Enable compatibility mode
   pingTimeout: 60000,
   pingInterval: 25000,
+  path: "/socket.io",
 });
 
 // Connection Manager
@@ -180,9 +175,14 @@ const logEvent = (event, socketId, data = {}) => {
 // Socket.IO event handlers
 io.on("connection", (socket) => {
   logEvent("connection", socket.id);
+  console.log(`New connection: ${socket.id}`);
 
   connectionManager.addUser(socket.id);
   io.emit("stats-update", connectionManager.getConnectionStats());
+
+  socket.on("error", (error) => {
+    console.error(`Socket ${socket.id} error:`, error);
+  });
 
   socket.on("find-match", () => {
     logEvent("find-match", socket.id);
@@ -264,8 +264,9 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("disconnect", () => {
+  socket.on("disconnect", (reason) => {
     logEvent("disconnect", socket.id);
+    console.log(`Socket ${socket.id} disconnected. Reason: ${reason}`);
 
     const partnerId = connectionManager.breakPartnership(socket.id);
     if (partnerId) {
@@ -342,6 +343,17 @@ server.listen(PORT, () => {
 - Port: ${PORT}
 - WebSocket: Ready
   `);
+});
+
+// Global error handler for uncaught exceptions
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception:", error);
+  // Optionally, you can gracefully shut down your server here
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  // Optionally, you can gracefully shut down your server here
 });
 
 module.exports = { app, server, io };
