@@ -295,7 +295,7 @@ server.on("upgrade", (request, socket, head) => {
   });
 });
 
-// Add WebSocket specific logging
+// Adding  WebSocket specific logging
 io.engine.on("connection_error", (err) => {
   console.error("Connection error:", err);
 });
