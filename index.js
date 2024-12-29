@@ -44,26 +44,34 @@ app.use(
 app.set("trust proxy", 1);
 
 // Enhanced CORS configuration
-const corsOptions = {
-  origin: (origin, callback) => {
-    const allowedOrigins =
-      config.NODE_ENV === "production"
-        ? config.CORS_ORIGIN
-        : [
-            "https://localhost:5173",
-            "http://localhost:5173",
-            ...config.CORS_ORIGIN,
-          ];
+// const corsOptions = {
+//   origin: (origin, callback) => {
+//     const allowedOrigins =
+//       config.NODE_ENV === "production"
+//         ? config.CORS_ORIGIN
+//         : [
+//             "https://localhost:5173",
+//             "http://localhost:5173",
+//             ...config.CORS_ORIGIN,
+//           ];
 
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("CORS not allowed"));
-    }
-  },
-  methods: ["GET", "POST", "OPTIONS"],
-  credentials: true,
-  optionsSuccessStatus: 204,
+//     if (!origin || allowedOrigins.includes(origin)) {
+//       callback(null, true);
+//     } else {
+//       callback(new Error("CORS not allowed"));
+//     }
+//   },
+//   methods: ["GET", "POST", "OPTIONS"],
+//   credentials: true,
+//   optionsSuccessStatus: 204,
+// };
+const corsOptions = {
+  origin:
+    NODE_ENV === "production"
+      ? CORS_ORIGIN
+      : ["https://localhost:5173", "http://localhost:5173"],
+  methods: ["GET", "POST"],
+  credentials: NODE_ENV === "production",
 };
 
 app.use(cors(corsOptions));
