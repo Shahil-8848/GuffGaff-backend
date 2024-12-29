@@ -66,10 +66,7 @@ app.set("trust proxy", 1);
 //   optionsSuccessStatus: 204,
 // };
 const corsOptions = {
-  origin:
-    NODE_ENV === "production"
-      ? CORS_ORIGIN
-      : ["https://localhost:5173", "http://localhost:5173"],
+  origin: NODE_ENV === "production" ? CORS_ORIGIN : "*",
   methods: ["GET", "POST"],
   credentials: NODE_ENV === "production",
 };
@@ -155,6 +152,39 @@ class ConnectionManager {
     return true;
   }
 
+  findMatch(socketId) {
+    console.log(`Finding match for ${socketId}`);
+
+    // First, check if the user is already in a partnership
+    if (this.partnerships.has(socketId)) {
+      console.log(`${socketId} is already in a partnership. Breaking it.`);
+      this.breakPartnership(socketId);
+    }
+
+    // Remove from waiting queue if present
+    this.removeFromWaitingQueue(socketId);
+
+    // Try to find a waiting partner
+    const waitingPartnerId = this.getNextWaitingUser();
+
+    if (waitingPartnerId) {
+      console.log(`Match found: ${socketId} with ${waitingPartnerId}`);
+      const { roomId, success } = this.createPartnership(
+        socketId,
+        waitingPartnerId
+      );
+
+      if (success) {
+        return { matched: true, partnerId: waitingPartnerId, roomId };
+      }
+    }
+
+    // If no match found, add to waiting queue
+    this.addToWaitingQueue(socketId);
+    console.log(`No match found. ${socketId} added to waiting queue.`);
+    return { matched: false };
+  }
+
   removeUser(socketId) {
     this.users.delete(socketId);
     this.removeFromWaitingQueue(socketId);
@@ -185,7 +215,15 @@ class ConnectionManager {
       return { success: false, error: "Failed to create partnership" };
     }
   }
-
+  getNextWaitingUser() {
+    while (this.waitingQueue.length > 0) {
+      const nextId = this.waitingQueue.shift();
+      if (this.users.has(nextId) && !this.partnerships.has(nextId)) {
+        return nextId;
+      }
+    }
+    return null;
+  }
   breakPartnership(socketId) {
     const partnership = this.partnerships.get(socketId);
     if (!partnership) return null;
