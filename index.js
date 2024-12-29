@@ -120,6 +120,7 @@ class ConnectionManager {
       room: null,
       connectionAttempts: 0,
     });
+    this.broadcastActiveUsers();
   }
 
   cleanup() {
@@ -144,6 +145,12 @@ class ConnectionManager {
     this.waitingQueue.push(socketId);
     user.lastActive = Date.now();
     return true;
+  }
+
+  removeUser(socketId) {
+    this.users.delete(socketId);
+    this.removeFromWaitingQueue(socketId);
+    this.broadcastActiveUsers();
   }
 
   createPartnership(socket1Id, socket2Id) {
@@ -205,6 +212,10 @@ class ConnectionManager {
       uptime: process.uptime(),
       lastCleanup: this.lastCleanup,
     };
+  }
+  broadcastActiveUsers() {
+    const activeUsers = this.users.size;
+    io.emit("active-users", activeUsers);
   }
 }
 
