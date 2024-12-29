@@ -6,19 +6,20 @@ const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const debug = require("debug")("webrtc:server");
 
-// Environment variables with defaults
+// Enhanced configuration with proper defaults
 const config = {
   PORT: process.env.PORT || 3001,
   NODE_ENV: process.env.NODE_ENV || "production",
   CORS_ORIGIN: process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(",")
     : ["https://localhost:5173"],
-  RATE_LIMIT_WINDOW: parseInt(process.env.RATE_LIMIT_WINDOW) || 15 * 60 * 1000,
-  RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX) || 100,
   SOCKET_TIMEOUT: parseInt(process.env.SOCKET_TIMEOUT) || 60000,
   PING_INTERVAL: parseInt(process.env.PING_INTERVAL) || 25000,
   PING_TIMEOUT: parseInt(process.env.PING_TIMEOUT) || 10000,
   MAX_CLIENTS: parseInt(process.env.MAX_CLIENTS) || 1000,
+  CLEANUP_INTERVAL: parseInt(process.env.CLEANUP_INTERVAL) || 300000,
+  MAX_RECONNECT_ATTEMPTS: 3,
+  INACTIVE_TIMEOUT: 5 * 60 * 1000, // 5 minutes
 };
 
 // Initialize Express app and HTTP server
@@ -32,6 +33,7 @@ app.use(
       directives: {
         defaultSrc: ["'self'"],
         connectSrc: ["'self'", "wss:", "https:"],
+        mediaSrc: ["'self'", "blob:"],
         upgradeInsecureRequests: null,
       },
     },
@@ -40,77 +42,70 @@ app.use(
   })
 );
 
-// Trust proxy settings for secure headers
+// Trust proxy for secure headers
 app.set("trust proxy", 1);
 
-// Enhanced CORS configuration
-// const corsOptions = {
-//   origin: (origin, callback) => {
-//     const allowedOrigins =
-//       config.NODE_ENV === "production"
-//         ? config.CORS_ORIGIN
-//         : [
-//             "https://localhost:5173",
-//             "http://localhost:5173",
-//             ...config.CORS_ORIGIN,
-//           ];
-
-//     if (!origin || allowedOrigins.includes(origin)) {
-//       callback(null, true);
-//     } else {
-//       callback(new Error("CORS not allowed"));
-//     }
-//   },
-//   methods: ["GET", "POST", "OPTIONS"],
-//   credentials: true,
-//   optionsSuccessStatus: 204,
-// };
+// Enhanced CORS with proper error handling
 const corsOptions = {
-  origin: NODE_ENV === "production" ? CORS_ORIGIN : "*",
+  origin: (origin, callback) => {
+    const allowedOrigins = config.CORS_ORIGIN;
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("CORS not allowed"));
+    }
+  },
   methods: ["GET", "POST"],
-  credentials: NODE_ENV === "production",
+  credentials: true,
+  optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
 
 // Rate limiting with enhanced configuration
 const limiter = rateLimit({
-  windowMs: config.RATE_LIMIT_WINDOW,
-  max: config.RATE_LIMIT_MAX,
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: true,
-  message: { error: "Too many requests, please try again later." },
-  keyGenerator: (req) => req.ip,
+  handler: (req, res) => {
+    debug("Rate limit exceeded:", req.ip);
+    res.status(429).json({
+      error: "Too many requests, please try again later.",
+      retryAfter: Math.ceil(req.rateLimit.resetTime / 1000),
+    });
+  },
 });
 
 app.use(limiter);
 
-// Socket.IO initialization with enhanced configuration
-const io = new Server(server, {
-  cors: corsOptions,
-  transports: ["polling", "websocket"],
-  allowEIO3: true,
-  pingTimeout: config.PING_TIMEOUT,
-  pingInterval: config.PING_INTERVAL,
-  path: "/socket.io",
-  connectionStateRecovery: {
-    maxDisconnectionDuration: 2000,
-    skipMiddlewares: true,
-  },
-  maxHttpBufferSize: 1e6, // 1 MB
-  connectTimeout: 45000,
-});
-
-// Enhanced Connection Manager with error handling and monitoring
 class ConnectionManager {
-  constructor() {
+  constructor(io) {
+    this.io = io;
     this.users = new Map();
     this.partnerships = new Map();
     this.waitingQueue = [];
     this.roomCounter = 0;
     this.lastCleanup = Date.now();
-    this.cleanupInterval = setInterval(() => this.cleanup(), 300000); // 5 minutes
+
+    // Periodic cleanup of stale connections
+    setInterval(() => this.cleanup(), config.CLEANUP_INTERVAL);
+  }
+
+  cleanup() {
+    const now = Date.now();
+    debug("Running cleanup...");
+
+    for (const [socketId, user] of this.users.entries()) {
+      if (now - user.lastActive > config.INACTIVE_TIMEOUT) {
+        debug(`Cleaning up inactive user: ${socketId}`);
+        this.removeUser(socketId);
+      }
+    }
+
+    this.lastCleanup = now;
+    this.broadcastStats();
   }
 
   addUser(socketId) {
@@ -125,78 +120,44 @@ class ConnectionManager {
       room: null,
       connectionAttempts: 0,
     });
-    this.broadcastActiveUsers();
-  }
 
-  cleanup() {
-    const now = Date.now();
-    const inactiveTimeout = 300000; // 5 minutes
-
-    for (const [socketId, user] of this.users.entries()) {
-      if (now - user.lastActive > inactiveTimeout) {
-        this.removeUser(socketId);
-      }
-    }
-
-    this.lastCleanup = now;
-  }
-
-  addToWaitingQueue(socketId) {
-    if (this.waitingQueue.includes(socketId)) return false;
-
-    const user = this.users.get(socketId);
-    if (!user) return false;
-
-    this.waitingQueue.push(socketId);
-    user.lastActive = Date.now();
-    return true;
+    this.broadcastStats();
+    debug(`User added: ${socketId}`);
   }
 
   findMatch(socketId) {
-    console.log(`Finding match for ${socketId}`);
+    debug(`Finding match for ${socketId}`);
 
-    // First, check if the user is already in a partnership
     if (this.partnerships.has(socketId)) {
-      console.log(`${socketId} is already in a partnership. Breaking it.`);
       this.breakPartnership(socketId);
     }
 
-    // Remove from waiting queue if present
     this.removeFromWaitingQueue(socketId);
-
-    // Try to find a waiting partner
     const waitingPartnerId = this.getNextWaitingUser();
 
     if (waitingPartnerId) {
-      console.log(`Match found: ${socketId} with ${waitingPartnerId}`);
       const { roomId, success } = this.createPartnership(
         socketId,
         waitingPartnerId
       );
-
       if (success) {
         return { matched: true, partnerId: waitingPartnerId, roomId };
       }
     }
 
-    // If no match found, add to waiting queue
     this.addToWaitingQueue(socketId);
-    console.log(`No match found. ${socketId} added to waiting queue.`);
     return { matched: false };
-  }
-
-  removeUser(socketId) {
-    this.users.delete(socketId);
-    this.removeFromWaitingQueue(socketId);
-    this.broadcastActiveUsers();
   }
 
   createPartnership(socket1Id, socket2Id) {
     try {
       const roomId = `room_${++this.roomCounter}_${Date.now()}`;
+
+      // Update partnerships
       this.partnerships.set(socket1Id, { partnerId: socket2Id, roomId });
       this.partnerships.set(socket2Id, { partnerId: socket1Id, roomId });
 
+      // Update user states
       const user1 = this.users.get(socket1Id);
       const user2 = this.users.get(socket2Id);
 
@@ -209,26 +170,24 @@ class ConnectionManager {
         user2.lastActive = Date.now();
       }
 
+      this.broadcastStats();
+      debug(
+        `Partnership created: ${socket1Id} <-> ${socket2Id} in room ${roomId}`
+      );
       return { roomId, success: true };
     } catch (error) {
       debug("Partnership creation error:", error);
       return { success: false, error: "Failed to create partnership" };
     }
   }
-  getNextWaitingUser() {
-    while (this.waitingQueue.length > 0) {
-      const nextId = this.waitingQueue.shift();
-      if (this.users.has(nextId) && !this.partnerships.has(nextId)) {
-        return nextId;
-      }
-    }
-    return null;
-  }
+
   breakPartnership(socketId) {
     const partnership = this.partnerships.get(socketId);
     if (!partnership) return null;
 
     const { partnerId, roomId } = partnership;
+
+    // Update user states
     const partnerUser = this.users.get(partnerId);
     const user = this.users.get(socketId);
 
@@ -244,10 +203,52 @@ class ConnectionManager {
       user.lastActive = Date.now();
     }
 
+    // Clean up partnerships
     this.partnerships.delete(partnerId);
     this.partnerships.delete(socketId);
 
+    this.broadcastStats();
+    debug(`Partnership broken: ${socketId} <-> ${partnerId}`);
     return { partnerId, roomId };
+  }
+
+  removeUser(socketId) {
+    this.breakPartnership(socketId);
+    this.removeFromWaitingQueue(socketId);
+    this.users.delete(socketId);
+    this.broadcastStats();
+    debug(`User removed: ${socketId}`);
+  }
+
+  addToWaitingQueue(socketId) {
+    if (!this.waitingQueue.includes(socketId)) {
+      this.waitingQueue.push(socketId);
+      const user = this.users.get(socketId);
+      if (user) {
+        user.lastActive = Date.now();
+      }
+      debug(`Added to waiting queue: ${socketId}`);
+      return true;
+    }
+    return false;
+  }
+
+  removeFromWaitingQueue(socketId) {
+    const index = this.waitingQueue.indexOf(socketId);
+    if (index !== -1) {
+      this.waitingQueue.splice(index, 1);
+      debug(`Removed from waiting queue: ${socketId}`);
+    }
+  }
+
+  getNextWaitingUser() {
+    while (this.waitingQueue.length > 0) {
+      const nextId = this.waitingQueue.shift();
+      if (this.users.has(nextId) && !this.partnerships.has(nextId)) {
+        return nextId;
+      }
+    }
+    return null;
   }
 
   getStats() {
@@ -259,131 +260,125 @@ class ConnectionManager {
       lastCleanup: this.lastCleanup,
     };
   }
-  broadcastActiveUsers() {
-    const activeUsers = this.users.size;
-    io.emit("active-users", activeUsers);
+
+  broadcastStats() {
+    this.io.emit("stats-update", this.getStats());
+  }
+
+  updateUserActivity(socketId) {
+    const user = this.users.get(socketId);
+    if (user) {
+      user.lastActive = Date.now();
+    }
   }
 }
 
-const connectionManager = new ConnectionManager();
+// Socket.IO initialization with enhanced configuration
+const io = new Server(server, {
+  cors: corsOptions,
+  pingTimeout: config.PING_TIMEOUT,
+  pingInterval: config.PING_INTERVAL,
+  transports: ["websocket", "polling"],
+  allowEIO3: true,
+  maxHttpBufferSize: 1e6,
+  connectTimeout: 45000,
+  path: "/socket.io",
+});
 
-// Enhanced logging middleware
-const logEvent = (event, socketId, data = {}) => {
-  debug(`[${new Date().toISOString()}] ${event} | Socket: ${socketId}`, data);
-};
+const connectionManager = new ConnectionManager(io);
 
 // Socket connection handling with enhanced error handling
 io.on("connection", (socket) => {
   try {
+    debug(`New connection: ${socket.id}`);
     connectionManager.addUser(socket.id);
-    logEvent("connection", socket.id);
-
-    // Broadcast updated stats
-    io.emit("stats-update", connectionManager.getStats());
-
-    // Enhanced error handling for socket events
-    socket.on("error", (error) => {
-      logEvent("error", socket.id, error);
-      socket.emit("error", { message: "An error occurred" });
-    });
 
     socket.on("find-match", () => {
       try {
-        const oldPartnership = connectionManager.breakPartnership(socket.id);
-        if (oldPartnership) {
-          io.to(oldPartnership.partnerId).emit("partner-left");
-        }
+        connectionManager.updateUserActivity(socket.id);
+        const { matched, partnerId, roomId } = connectionManager.findMatch(
+          socket.id
+        );
 
-        const waitingPartnerId = connectionManager.getNextWaitingUser();
-        if (waitingPartnerId) {
-          const { roomId, success } = connectionManager.createPartnership(
-            socket.id,
-            waitingPartnerId
-          );
+        if (matched && partnerId) {
+          const matchData = {
+            timestamp: Date.now(),
+            roomId,
+            matchId: `${socket.id.slice(0, 4)}-${partnerId.slice(0, 4)}`,
+          };
 
-          if (success) {
-            const matchData = {
-              timestamp: Date.now(),
-              roomId,
-              matchId: `${socket.id.slice(0, 4)}-${waitingPartnerId.slice(
-                0,
-                4
-              )}`,
-            };
-
-            socket.emit("match", { ...matchData, peerId: waitingPartnerId });
-            io.to(waitingPartnerId).emit("match", {
-              ...matchData,
-              peerId: socket.id,
-            });
-          }
+          socket.emit("match", { ...matchData, peerId: partnerId });
+          io.to(partnerId).emit("match", { ...matchData, peerId: socket.id });
         } else {
-          connectionManager.addToWaitingQueue(socket.id);
           socket.emit("waiting", {
             position: connectionManager.waitingQueue.length,
           });
         }
-
-        io.emit("stats-update", connectionManager.getStats());
       } catch (error) {
-        logEvent("find-match-error", socket.id, error);
+        debug("Find match error:", error);
         socket.emit("error", { message: "Failed to find match" });
       }
     });
 
-    // WebRTC signaling events with enhanced error handling
+    // WebRTC signaling with enhanced validation
     socket.on("offer", ({ peerId, offer }) => {
       try {
+        connectionManager.updateUserActivity(socket.id);
         const partnership = connectionManager.partnerships.get(socket.id);
+
         if (partnership && partnership.partnerId === peerId) {
           io.to(peerId).emit("offer", { offer, peerId: socket.id });
         }
       } catch (error) {
-        logEvent("offer-error", socket.id, error);
+        debug("Offer error:", error);
       }
     });
 
     socket.on("answer", ({ peerId, answer }) => {
       try {
+        connectionManager.updateUserActivity(socket.id);
         const partnership = connectionManager.partnerships.get(socket.id);
+
         if (partnership && partnership.partnerId === peerId) {
           io.to(peerId).emit("answer", { answer, peerId: socket.id });
         }
       } catch (error) {
-        logEvent("answer-error", socket.id, error);
+        debug("Answer error:", error);
       }
     });
 
     socket.on("ice-candidate", ({ peerId, candidate }) => {
       try {
+        connectionManager.updateUserActivity(socket.id);
         const partnership = connectionManager.partnerships.get(socket.id);
+
         if (partnership && partnership.partnerId === peerId) {
           io.to(peerId).emit("ice-candidate", { candidate, peerId: socket.id });
         }
       } catch (error) {
-        logEvent("ice-candidate-error", socket.id, error);
+        debug("ICE candidate error:", error);
       }
     });
 
     socket.on("disconnect", () => {
       try {
+        debug(`Disconnection: ${socket.id}`);
         const partnership = connectionManager.breakPartnership(socket.id);
         if (partnership) {
           io.to(partnership.partnerId).emit("partner-left");
         }
         connectionManager.removeUser(socket.id);
-        io.emit("stats-update", connectionManager.getStats());
       } catch (error) {
-        logEvent("disconnect-error", socket.id, error);
+        debug("Disconnect error:", error);
       }
     });
   } catch (error) {
-    logEvent("connection-error", socket.id, error);
+    debug("Connection error:", error);
     socket.emit("error", { message: "Connection failed" });
   }
 });
 
-// Health check endpoint with enhanced monitoring
+// Health check endpoint
 app.get("/health", (req, res) => {
   try {
     const stats = connectionManager.getStats();
@@ -393,6 +388,7 @@ app.get("/health", (req, res) => {
       ...stats,
     });
   } catch (error) {
+    debug("Health check error:", error);
     res.status(500).json({ status: "unhealthy", error: error.message });
   }
 });
@@ -408,7 +404,7 @@ process.on("unhandledRejection", (reason, promise) => {
   // Implement graceful shutdown if needed
 });
 
-// Start server with enhanced logging
+// Start server
 server.listen(config.PORT, () => {
   debug(`
 🚀 Server Status:
