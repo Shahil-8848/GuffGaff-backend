@@ -136,6 +136,7 @@ class ConnectionManager {
       return partnerId;
     }
     return null;
+    // console.log()
   }
 
   getNextWaitingUser() {
@@ -229,9 +230,9 @@ io.on("connection", (socket) => {
 
     io.emit("stats-update", connectionManager.getConnectionStats());
   });
-
   socket.on("offer", (data) => {
     logEvent("offer", socket.id, { peerId: data.peerId });
+    console.log(`Received offer from ${socket.id} for ${data.peerId}`);
     io.to(data.peerId).emit("offer", {
       offer: data.offer,
       peerId: socket.id,
@@ -240,8 +241,18 @@ io.on("connection", (socket) => {
 
   socket.on("answer", (data) => {
     logEvent("answer", socket.id, { peerId: data.peerId });
+    console.log(`Received answer from ${socket.id} for ${data.peerId}`);
     io.to(data.peerId).emit("answer", {
       answer: data.answer,
+      peerId: socket.id,
+    });
+  });
+
+  socket.on("ice-candidate", (data) => {
+    logEvent("ice-candidate", socket.id, { peerId: data.peerId });
+    console.log(`Received ICE candidate from ${socket.id} for ${data.peerId}`);
+    io.to(data.peerId).emit("ice-candidate", {
+      candidate: data.candidate,
       peerId: socket.id,
     });
   });
@@ -255,13 +266,6 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString(),
       });
     }
-  });
-  socket.on("ice-candidate", (data) => {
-    logEvent("ice-candidate", socket.id, { peerId: data.peerId });
-    io.to(data.peerId).emit("ice-candidate", {
-      candidate: data.candidate,
-      peerId: socket.id,
-    });
   });
 
   socket.on("disconnect", (reason) => {
