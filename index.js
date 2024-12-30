@@ -244,19 +244,19 @@ io.on("connection", (socket) => {
   socket.on("ice-candidate", ({ peerId, candidate, fromPeerId }) => {
     console.log(`Forwarding ICE candidate from ${fromPeerId} to ${peerId}`);
 
-    // Find the room where both peers are present
+    const room = connectionManager.findRoomByPeerId(fromPeerId);
 
-    const room = findRoomByPeerId(peerId);
-
-    if (!room) return;
-
-    // Get the other peer in the room
+    if (!room) {
+      console.log(`Room not found for peer ${fromPeerId}`);
+      return;
+    }
 
     const otherPeer = room.participants.find((p) => p !== fromPeerId);
 
-    if (!otherPeer) return;
-
-    // Forward the candidate to the other peer
+    if (!otherPeer) {
+      console.log(`Other peer not found in room for ${fromPeerId}`);
+      return;
+    }
 
     io.to(otherPeer).emit("ice-candidate", {
       candidate,
@@ -335,6 +335,15 @@ app.get("/socket-test", (req, res) => {
       </body>
     </html>
   `);
+});
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception:", error);
+  // Log the error and continue running the server
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  // Log the error and continue running the server
 });
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
