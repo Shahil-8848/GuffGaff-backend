@@ -230,30 +230,37 @@ io.on("connection", (socket) => {
     }
     io.emit("stats-update", connectionManager.getConnectionStats());
   });
-  socket.on("offer", (data) => {
-    logEvent("offer", socket.id, { peerId: data.peerId });
-    console.log(`Received offer from ${socket.id} for ${data.peerId}`);
-    io.to(data.peerId).emit("offer", {
-      offer: data.offer,
-      peerId: socket.id,
-    });
+  socket.on("offer", ({ peerId, offer, fromPeerId }) => {
+    console.log(`Forwarding offer from ${fromPeerId} to ${peerId}`);
+
+    io.to(peerId).emit("offer", { offer, fromPeerId });
+  });
+  socket.on("answer", ({ peerId, answer, fromPeerId }) => {
+    console.log(`Forwarding answer from ${fromPeerId} to ${peerId}`);
+
+    io.to(peerId).emit("answer", { answer, fromPeerId });
   });
 
-  socket.on("answer", (data) => {
-    logEvent("answer", socket.id, { peerId: data.peerId });
-    console.log(`Received answer from ${socket.id} for ${data.peerId}`);
-    io.to(data.peerId).emit("answer", {
-      answer: data.answer,
-      peerId: socket.id,
-    });
-  });
+  socket.on("ice-candidate", ({ peerId, candidate, fromPeerId }) => {
+    console.log(`Forwarding ICE candidate from ${fromPeerId} to ${peerId}`);
 
-  socket.on("ice-candidate", (data) => {
-    logEvent("ice-candidate", socket.id, { peerId: data.peerId });
-    console.log(`Received ICE candidate from ${socket.id} for ${data.peerId}`);
-    io.to(data.peerId).emit("ice-candidate", {
-      candidate: data.candidate,
-      peerId: socket.id,
+    // Find the room where both peers are present
+
+    const room = findRoomByPeerId(peerId);
+
+    if (!room) return;
+
+    // Get the other peer in the room
+
+    const otherPeer = room.participants.find((p) => p !== fromPeerId);
+
+    if (!otherPeer) return;
+
+    // Forward the candidate to the other peer
+
+    io.to(otherPeer).emit("ice-candidate", {
+      candidate,
+      fromPeerId,
     });
   });
   socket.on("chat-message", (message) => {
