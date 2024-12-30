@@ -187,7 +187,6 @@ io.on("connection", (socket) => {
 
   socket.on("find-match", () => {
     logEvent("find-match", socket.id);
-
     const oldPartnerId = connectionManager.breakPartnership(socket.id);
     if (oldPartnerId) {
       io.to(oldPartnerId).emit("partner-left", {
@@ -195,30 +194,32 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString(),
       });
     }
-
     const waitingPartnerId = connectionManager.getNextWaitingUser();
-
     if (waitingPartnerId) {
       const roomId = connectionManager.createPartnership(
         socket.id,
         waitingPartnerId
       );
-
       const matchData = {
         timestamp: new Date().toISOString(),
         roomId,
         matchId: `${socket.id.slice(0, 4)}-${waitingPartnerId.slice(0, 4)}`,
       };
-
-      socket.emit("match", { ...matchData, peerId: waitingPartnerId });
+      // The waiting user becomes the initiator
+      socket.emit("match", {
+        ...matchData,
+        peerId: waitingPartnerId,
+        isInitiator: false, // This user is the receiver
+      });
       io.to(waitingPartnerId).emit("match", {
         ...matchData,
         peerId: socket.id,
+        isInitiator: true, // Waiting user becomes initiator
       });
-
       logEvent("match-created", socket.id, {
         partnerId: waitingPartnerId,
         roomId,
+        initiator: waitingPartnerId, // Log who is the initiator
       });
     } else {
       connectionManager.addToWaitingQueue(socket.id);
@@ -227,7 +228,6 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString(),
       });
     }
-
     io.emit("stats-update", connectionManager.getConnectionStats());
   });
   socket.on("offer", (data) => {
