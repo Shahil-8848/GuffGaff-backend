@@ -46,17 +46,18 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Socket.IO setup
+// Socket.IO setup with improved configuration
 const io = new Server(server, {
   cors: corsOptions,
-  transports: ["websocket", "polling"],
-  allowEIO3: true,
+  transports: ["websocket"],
   pingTimeout: 60000,
   pingInterval: 25000,
   path: "/socket.io",
+  connectTimeout: 45000,
+  maxHttpBufferSize: 1e6,
 });
 
-// Connection Manager Class
+// Enhanced Connection Manager Class
 class ConnectionManager {
   constructor() {
     this.users = new Map();
@@ -64,15 +65,20 @@ class ConnectionManager {
     this.waitingQueue = [];
     this.roomCounter = 0;
     this.rooms = new Map();
+    this.connectionTimeouts = new Map();
+    this.maxConnectionAttempts = 3;
+    this.connectionTimeout = 30000; // 30 seconds
   }
 
-  addUser(socketId, userId) {
+  addUser(socketId) {
     this.users.set(socketId, {
-      userId,
+      id: socketId,
       inCall: false,
       room: null,
-      connectedAt: new Date().toISOString(),
+      joinedAt: new Date().toISOString(),
       lastActive: new Date().toISOString(),
+      connectionAttempts: 0,
+      signalingState: "new",
     });
   }
 
@@ -86,8 +92,12 @@ class ConnectionManager {
   }
 
   addToWaitingQueue(socketId) {
+    const user = this.users.get(socketId);
+    if (!user) return false;
+
     if (!this.waitingQueue.includes(socketId)) {
       this.waitingQueue.push(socketId);
+      user.lastActive = new Date().toISOString();
       return true;
     }
     return false;
@@ -103,21 +113,45 @@ class ConnectionManager {
   }
 
   getNextWaitingUser() {
-    if (this.waitingQueue.length > 0) {
-      return this.waitingQueue.shift();
+    while (this.waitingQueue.length > 0) {
+      const nextUserId = this.waitingQueue.shift();
+      const user = this.users.get(nextUserId);
+
+      if (user && !user.inCall) {
+        return nextUserId;
+      }
     }
     return null;
   }
 
   createPartnership(socket1Id, socket2Id) {
-    const roomId = `room_${++this.roomCounter}`;
-    this.partnerships.set(socket1Id, socket2Id);
-    this.partnerships.set(socket2Id, socket1Id);
+    // Clear any existing partnerships
+    this.breakPartnership(socket1Id);
+    this.breakPartnership(socket2Id);
 
+    const roomId = `room_${++this.roomCounter}`;
+
+    // Create room with enhanced metadata
     this.rooms.set(roomId, {
+      id: roomId,
       participants: [socket1Id, socket2Id],
       createdAt: new Date().toISOString(),
+      lastActivity: new Date().toISOString(),
+      state: "connecting",
+      connectionAttempts: 0,
+      signalingState: {
+        [socket1Id]: "new",
+        [socket2Id]: "new",
+      },
+      iceCandidates: {
+        [socket1Id]: [],
+        [socket2Id]: [],
+      },
     });
+
+    // Set up partnerships
+    this.partnerships.set(socket1Id, socket2Id);
+    this.partnerships.set(socket2Id, socket1Id);
 
     const user1 = this.users.get(socket1Id);
     const user2 = this.users.get(socket2Id);
@@ -129,16 +163,67 @@ class ConnectionManager {
       user2.room = roomId;
     }
 
+    // Set connection timeout
+    this.setConnectionTimeout(roomId);
+
     return roomId;
   }
 
+  setConnectionTimeout(roomId) {
+    if (this.connectionTimeouts.has(roomId)) {
+      clearTimeout(this.connectionTimeouts.get(roomId));
+    }
+
+    const timeout = setTimeout(() => {
+      const room = this.rooms.get(roomId);
+      if (room && room.state === "connecting") {
+        room.state = "failed";
+        room.participants.forEach((participantId) => {
+          const user = this.users.get(participantId);
+          if (user) {
+            user.connectionAttempts += 1;
+            user.inCall = false;
+            user.room = null;
+          }
+        });
+        this.breakPartnership(room.participants[0]);
+      }
+    }, this.connectionTimeout);
+
+    this.connectionTimeouts.set(roomId, timeout);
+  }
+
   findRoomByPeerId(peerId) {
-    for (const [roomId, room] of this.rooms) {
-      if (room.participants.includes(peerId)) {
-        return { roomId, participants: room.participants };
+    const user = this.users.get(peerId);
+    if (!user || !user.room) return null;
+
+    const room = this.rooms.get(user.room);
+    if (!room) return null;
+
+    return {
+      roomId: room.id,
+      participants: room.participants,
+      state: room.state,
+    };
+  }
+
+  updateRoomState(roomId, state, peerId) {
+    const room = this.rooms.get(roomId);
+    if (room) {
+      room.lastActivity = new Date().toISOString();
+
+      if (peerId) {
+        room.signalingState[peerId] = state;
+      }
+
+      if (state === "connected") {
+        room.state = "active";
+        if (this.connectionTimeouts.has(roomId)) {
+          clearTimeout(this.connectionTimeouts.get(roomId));
+          this.connectionTimeouts.delete(roomId);
+        }
       }
     }
-    return null;
   }
 
   breakPartnership(socketId) {
@@ -148,16 +233,22 @@ class ConnectionManager {
       const partnerUser = this.users.get(partnerId);
 
       if (user && user.room) {
+        if (this.connectionTimeouts.has(user.room)) {
+          clearTimeout(this.connectionTimeouts.get(user.room));
+          this.connectionTimeouts.delete(user.room);
+        }
         this.rooms.delete(user.room);
       }
 
       if (user) {
         user.inCall = false;
         user.room = null;
+        user.signalingState = "new";
       }
       if (partnerUser) {
         partnerUser.inCall = false;
         partnerUser.room = null;
+        partnerUser.signalingState = "new";
       }
 
       this.partnerships.delete(socketId);
@@ -168,46 +259,43 @@ class ConnectionManager {
   }
 
   getConnectionStats() {
+    const activeRooms = Array.from(this.rooms.values()).filter(
+      (room) => room.state === "active"
+    );
+
     return {
       totalUsers: this.users.size,
       waitingUsers: this.waitingQueue.length,
-      activePartnerships: this.partnerships.size / 2,
+      activePartnerships: activeRooms.length,
+      failedConnections: Array.from(this.rooms.values()).filter(
+        (room) => room.state === "failed"
+      ).length,
     };
-  }
-
-  updateUserActivity(socketId) {
-    const user = this.users.get(socketId);
-    if (user) {
-      user.lastActive = new Date().toISOString();
-    }
   }
 }
 
+// Initialize connection manager
 const connectionManager = new ConnectionManager();
 
-// Logging middleware
+// Enhanced logging middleware
 const logEvent = (event, socketId, data = {}) => {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${event} | Socket: ${socketId} | Data:`, data);
+  console.log(
+    `[${timestamp}] ${event} | Socket: ${socketId} | Data:`,
+    JSON.stringify(data)
+  );
 };
 
-// Socket.IO event handlers
+// Socket.IO event handlers with improved error handling and logging
 io.on("connection", (socket) => {
   logEvent("connection", socket.id);
-  console.log(`New connection: ${socket.id}`);
 
   connectionManager.addUser(socket.id);
   io.emit("stats-update", connectionManager.getConnectionStats());
 
+  // Handle find match request
   socket.on("find-match", () => {
     logEvent("find-match", socket.id);
-    const oldPartnerId = connectionManager.breakPartnership(socket.id);
-    if (oldPartnerId) {
-      io.to(oldPartnerId).emit("partner-left", {
-        reason: "Partner requested new match",
-        timestamp: new Date().toISOString(),
-      });
-    }
 
     const waitingPartnerId = connectionManager.getNextWaitingUser();
     if (waitingPartnerId) {
@@ -215,6 +303,8 @@ io.on("connection", (socket) => {
         socket.id,
         waitingPartnerId
       );
+
+      // Emit match events with enhanced metadata
       const matchData = {
         timestamp: new Date().toISOString(),
         roomId,
@@ -226,6 +316,7 @@ io.on("connection", (socket) => {
         peerId: waitingPartnerId,
         isInitiator: false,
       });
+
       io.to(waitingPartnerId).emit("match", {
         ...matchData,
         peerId: socket.id,
@@ -235,7 +326,7 @@ io.on("connection", (socket) => {
       logEvent("match-created", socket.id, {
         partnerId: waitingPartnerId,
         roomId,
-        initiator: waitingPartnerId,
+        matchData,
       });
     } else {
       connectionManager.addToWaitingQueue(socket.id);
@@ -244,43 +335,96 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString(),
       });
     }
+
     io.emit("stats-update", connectionManager.getConnectionStats());
   });
 
+  // Handle WebRTC signaling with improved error handling
   socket.on("offer", ({ peerId, offer, fromPeerId }) => {
-    console.log(`Forwarding offer from ${fromPeerId} to ${peerId}`);
-    io.to(peerId).emit("offer", { offer, fromPeerId });
+    logEvent("offer", socket.id, { toPeer: peerId });
+
+    const room = connectionManager.findRoomByPeerId(fromPeerId);
+    if (!room) {
+      socket.emit("signaling-error", {
+        type: "offer",
+        message: "Room not found",
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    connectionManager.updateRoomState(room.roomId, "offer-sent", fromPeerId);
+    io.to(peerId).emit("offer", {
+      offer,
+      fromPeerId,
+      roomId: room.roomId,
+      timestamp: new Date().toISOString(),
+    });
   });
 
   socket.on("answer", ({ peerId, answer, fromPeerId }) => {
-    console.log(`Forwarding answer from ${fromPeerId} to ${peerId}`);
-    io.to(peerId).emit("answer", { answer, fromPeerId });
+    logEvent("answer", socket.id, { toPeer: peerId });
+
+    const room = connectionManager.findRoomByPeerId(fromPeerId);
+    if (!room) {
+      socket.emit("signaling-error", {
+        type: "answer",
+        message: "Room not found",
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    connectionManager.updateRoomState(room.roomId, "answer-sent", fromPeerId);
+    io.to(peerId).emit("answer", {
+      answer,
+      fromPeerId,
+      roomId: room.roomId,
+      timestamp: new Date().toISOString(),
+    });
   });
 
   socket.on("ice-candidate", ({ peerId, candidate, fromPeerId }) => {
-    console.log(`Forwarding ICE candidate from ${fromPeerId} to ${peerId}`);
-    const room = connectionManager.findRoomByPeerId(fromPeerId);
+    logEvent("ice-candidate", socket.id, { toPeer: peerId });
 
+    const room = connectionManager.findRoomByPeerId(fromPeerId);
     if (!room) {
-      console.log(`Room not found for peer ${fromPeerId}`);
+      socket.emit("signaling-error", {
+        type: "ice-candidate",
+        message: "Room not found",
+        timestamp: new Date().toISOString(),
+      });
       return;
     }
 
     const otherPeer = room.participants.find((p) => p !== fromPeerId);
     if (!otherPeer) {
-      console.log(`Other peer not found in room for ${fromPeerId}`);
+      socket.emit("signaling-error", {
+        type: "ice-candidate",
+        message: "Peer not found in room",
+        timestamp: new Date().toISOString(),
+      });
       return;
     }
 
     io.to(otherPeer).emit("ice-candidate", {
       candidate,
       fromPeerId,
+      roomId: room.roomId,
+      timestamp: new Date().toISOString(),
     });
   });
 
+  // Handle connection state updates
+  socket.on("connection-state", ({ state, roomId }) => {
+    logEvent("connection-state", socket.id, { state, roomId });
+    connectionManager.updateRoomState(roomId, state, socket.id);
+    io.emit("stats-update", connectionManager.getConnectionStats());
+  });
+
+  // Handle disconnection
   socket.on("disconnect", (reason) => {
-    logEvent("disconnect", socket.id);
-    console.log(`Socket ${socket.id} disconnected. Reason: ${reason}`);
+    logEvent("disconnect", socket.id, { reason });
 
     const partnerId = connectionManager.breakPartnership(socket.id);
     if (partnerId) {
@@ -301,10 +445,11 @@ app.get("/health", (req, res) => {
     status: "healthy",
     timestamp: new Date().toISOString(),
     stats: connectionManager.getConnectionStats(),
+    environment: NODE_ENV,
   });
 });
 
-// WebSocket specific error handling
+// Error handling for WebSocket upgrades
 server.on("upgrade", (request, socket, head) => {
   socket.on("error", (err) => {
     console.error("Socket upgrade error:", err);
@@ -315,18 +460,6 @@ io.engine.on("connection_error", (err) => {
   console.error("Connection error:", err);
 });
 
-// CORS middleware
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept"
-  );
-  res.header("Access-Control-Allow-Credentials", "true");
-  next();
-});
-
 // Start server
 server.listen(PORT, () => {
   console.log(`
@@ -334,6 +467,7 @@ server.listen(PORT, () => {
 - Environment: ${NODE_ENV}
 - Port: ${PORT}
 - WebSocket: Ready
+- Cors Origin: ${CORS_ORIGIN}
   `);
 });
 
