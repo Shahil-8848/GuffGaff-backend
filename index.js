@@ -293,7 +293,6 @@ io.on("connection", (socket) => {
   connectionManager.addUser(socket.id);
   io.emit("stats-update", connectionManager.getConnectionStats());
 
-  // Handle find match request
   socket.on("find-match", () => {
     logEvent("find-match", socket.id);
 
@@ -304,23 +303,23 @@ io.on("connection", (socket) => {
         waitingPartnerId
       );
 
-      // Emit match events with enhanced metadata
       const matchData = {
         timestamp: new Date().toISOString(),
         roomId,
         matchId: `${socket.id.slice(0, 4)}-${waitingPartnerId.slice(0, 4)}`,
       };
 
+      // Send match events with correct peer IDs
       socket.emit("match", {
         ...matchData,
         peerId: waitingPartnerId,
-        isInitiator: false,
+        isInitiator: true,
       });
 
       io.to(waitingPartnerId).emit("match", {
         ...matchData,
         peerId: socket.id,
-        isInitiator: true,
+        isInitiator: false,
       });
 
       logEvent("match-created", socket.id, {
@@ -339,15 +338,25 @@ io.on("connection", (socket) => {
     io.emit("stats-update", connectionManager.getConnectionStats());
   });
 
-  // Handle WebRTC signaling with improved error handling
   socket.on("offer", ({ peerId, offer, fromPeerId }) => {
-    logEvent("offer", socket.id, { toPeer: peerId });
+    logEvent("offer", socket.id, { toPeer: peerId, fromPeer: fromPeerId });
 
     const room = connectionManager.findRoomByPeerId(fromPeerId);
     if (!room) {
       socket.emit("signaling-error", {
         type: "offer",
         message: "Room not found",
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // Verify that the peers are actually in the same room
+    const otherPeer = room.participants.find((p) => p !== fromPeerId);
+    if (otherPeer !== peerId) {
+      socket.emit("signaling-error", {
+        type: "offer",
+        message: "Invalid peer ID",
         timestamp: new Date().toISOString(),
       });
       return;
@@ -363,13 +372,24 @@ io.on("connection", (socket) => {
   });
 
   socket.on("answer", ({ peerId, answer, fromPeerId }) => {
-    logEvent("answer", socket.id, { toPeer: peerId });
+    logEvent("answer", socket.id, { toPeer: peerId, fromPeer: fromPeerId });
 
     const room = connectionManager.findRoomByPeerId(fromPeerId);
     if (!room) {
       socket.emit("signaling-error", {
         type: "answer",
         message: "Room not found",
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // Verify that the peers are actually in the same room
+    const otherPeer = room.participants.find((p) => p !== fromPeerId);
+    if (otherPeer !== peerId) {
+      socket.emit("signaling-error", {
+        type: "answer",
+        message: "Invalid peer ID",
         timestamp: new Date().toISOString(),
       });
       return;
@@ -385,7 +405,10 @@ io.on("connection", (socket) => {
   });
 
   socket.on("ice-candidate", ({ peerId, candidate, fromPeerId }) => {
-    logEvent("ice-candidate", socket.id, { toPeer: peerId });
+    logEvent("ice-candidate", socket.id, {
+      toPeer: peerId,
+      fromPeer: fromPeerId,
+    });
 
     const room = connectionManager.findRoomByPeerId(fromPeerId);
     if (!room) {
@@ -398,10 +421,10 @@ io.on("connection", (socket) => {
     }
 
     const otherPeer = room.participants.find((p) => p !== fromPeerId);
-    if (!otherPeer) {
+    if (!otherPeer || otherPeer !== peerId) {
       socket.emit("signaling-error", {
         type: "ice-candidate",
-        message: "Peer not found in room",
+        message: "Invalid peer ID",
         timestamp: new Date().toISOString(),
       });
       return;
@@ -413,6 +436,12 @@ io.on("connection", (socket) => {
       roomId: room.roomId,
       timestamp: new Date().toISOString(),
     });
+  });
+  io.to(otherPeer).emit("ice-candidate", {
+    candidate,
+    fromPeerId,
+    roomId: room.roomId,
+    timestamp: new Date().toISOString(),
   });
 
   // Handle connection state updates
