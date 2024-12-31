@@ -63,6 +63,7 @@ class ConnectionManager {
     this.partnerships = new Map();
     this.waitingQueue = [];
     this.roomCounter = 0;
+    this.rooms = new Map();
   }
 
   addUser(socketId) {
@@ -105,6 +106,12 @@ class ConnectionManager {
     this.partnerships.set(socket1Id, socket2Id);
     this.partnerships.set(socket2Id, socket1Id);
 
+    // Create room with participants
+    this.rooms.set(roomId, {
+      participants: [socket1Id, socket2Id],
+      createdAt: new Date().toISOString(),
+    });
+
     const user1 = this.users.get(socket1Id);
     const user2 = this.users.get(socket2Id);
 
@@ -121,8 +128,14 @@ class ConnectionManager {
   breakPartnership(socketId) {
     const partnerId = this.partnerships.get(socketId);
     if (partnerId) {
-      const partnerUser = this.users.get(partnerId);
       const user = this.users.get(socketId);
+      const partnerUser = this.users.get(partnerId);
+
+      // Remove room
+      if (user && user.room) {
+        this.rooms.delete(user.room);
+      }
+
       if (partnerUser) {
         partnerUser.inCall = false;
         partnerUser.room = null;
@@ -131,12 +144,12 @@ class ConnectionManager {
         user.inCall = false;
         user.room = null;
       }
+
       this.partnerships.delete(partnerId);
       this.partnerships.delete(socketId);
       return partnerId;
     }
     return null;
-    // console.log()
   }
 
   getNextWaitingUser() {
@@ -161,6 +174,15 @@ class ConnectionManager {
       totalUsers: this.users.size,
       waitingUsers: this.waitingQueue.length,
       activePartnerships: this.partnerships.size / 2,
+    };
+  }
+  findRoomByPeerId(peerId) {
+    const user = this.users.get(peerId);
+    if (!user || !user.room) return null;
+
+    return {
+      id: user.room,
+      participants: this.rooms.get(user.room)?.participants || [],
     };
   }
 }
@@ -230,10 +252,12 @@ io.on("connection", (socket) => {
     }
     io.emit("stats-update", connectionManager.getConnectionStats());
   });
-  socket.on("offer", ({ peerId, offer, fromPeerId }) => {
-    console.log(`Forwarding offer from ${fromPeerId} to ${peerId}`);
-
-    io.to(peerId).emit("offer", { offer, fromPeerId });
+  socket.on("offer", ({ peerId, offer }) => {
+    console.log(`Forwarding offer to ${peerId}`);
+    io.to(peerId).emit("offer", {
+      offer,
+      fromPeerId: socket.id,
+    });
   });
   socket.on("answer", ({ peerId, answer, fromPeerId }) => {
     console.log(`Forwarding answer from ${fromPeerId} to ${peerId}`);
@@ -257,6 +281,8 @@ io.on("connection", (socket) => {
       console.log(`Other peer not found in room for ${fromPeerId}`);
       return;
     }
+
+    console.log(`Forwarding ICE candidate from ${fromPeerId} to ${otherPeer}`);
 
     io.to(otherPeer).emit("ice-candidate", {
       candidate,
