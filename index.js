@@ -4,7 +4,7 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
-const ConnectionManager = require("./connectionManager");
+
 // Environment variables
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN
@@ -57,76 +57,204 @@ const io = new Server(server, {
 });
 
 // Connection Manager
+class ConnectionManager {
+  constructor() {
+    this.users = new Map();
+    this.partnerships = new Map();
+    this.waitingQueue = [];
+    this.roomCounter = 0;
+  }
+
+  addUser(socketId) {
+    this.users.set(socketId, {
+      inCall: false,
+      connectedAt: new Date().toISOString(),
+      lastActive: new Date().toISOString(),
+      room: null,
+    });
+  }
+
+  removeUser(socketId) {
+    const user = this.users.get(socketId);
+    if (user && user.room) {
+      this.breakPartnership(socketId);
+    }
+    this.users.delete(socketId);
+    this.removeFromWaitingQueue(socketId);
+  }
+
+  addToWaitingQueue(socketId) {
+    if (!this.waitingQueue.includes(socketId)) {
+      this.waitingQueue.push(socketId);
+      return true;
+    }
+    return false;
+  }
+
+  removeFromWaitingQueue(socketId) {
+    const index = this.waitingQueue.indexOf(socketId);
+    if (index > -1) {
+      this.waitingQueue.splice(index, 1);
+      return true;
+    }
+    return false;
+  }
+
+  createPartnership(socket1Id, socket2Id) {
+    const roomId = `room_${++this.roomCounter}`;
+    this.partnerships.set(socket1Id, socket2Id);
+    this.partnerships.set(socket2Id, socket1Id);
+
+    const user1 = this.users.get(socket1Id);
+    const user2 = this.users.get(socket2Id);
+
+    if (user1 && user2) {
+      user1.inCall = true;
+      user2.inCall = true;
+      user1.room = roomId;
+      user2.room = roomId;
+    }
+
+    return roomId;
+  }
+
+  breakPartnership(socketId) {
+    const partnerId = this.partnerships.get(socketId);
+    if (partnerId) {
+      const partnerUser = this.users.get(partnerId);
+      const user = this.users.get(socketId);
+      if (partnerUser) {
+        partnerUser.inCall = false;
+        partnerUser.room = null;
+      }
+      if (user) {
+        user.inCall = false;
+        user.room = null;
+      }
+      this.partnerships.delete(partnerId);
+      this.partnerships.delete(socketId);
+      return partnerId;
+    }
+    return null;
+    // console.log()
+  }
+
+  getNextWaitingUser() {
+    while (this.waitingQueue.length > 0) {
+      const nextId = this.waitingQueue.shift();
+      if (this.users.has(nextId) && !this.partnerships.has(nextId)) {
+        return nextId;
+      }
+    }
+    return null;
+  }
+
+  updateUserActivity(socketId) {
+    const user = this.users.get(socketId);
+    if (user) {
+      user.lastActive = new Date().toISOString();
+    }
+  }
+
+  getConnectionStats() {
+    return {
+      totalUsers: this.users.size,
+      waitingUsers: this.waitingQueue.length,
+      activePartnerships: this.partnerships.size / 2,
+    };
+  }
+}
+
 const connectionManager = new ConnectionManager();
 
+// Logging middleware
 const logEvent = (event, socketId, data = {}) => {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] ${event} | Socket: ${socketId} | Data:`, data);
 };
 
+// Socket.IO event handlers
 io.on("connection", (socket) => {
   logEvent("connection", socket.id);
+  console.log(`New connection: ${socket.id}`);
 
   connectionManager.addUser(socket.id);
-  io.emit("stats-update", connectionManager.getStats());
+  io.emit("stats-update", connectionManager.getConnectionStats());
+
+  socket.on("error", (error) => {
+    console.error(`Socket ${socket.id} error:`, error);
+  });
 
   socket.on("find-match", () => {
     logEvent("find-match", socket.id);
-
     const oldPartnerId = connectionManager.breakPartnership(socket.id);
     if (oldPartnerId) {
-      io.to(oldPartnerId).emit("partner-left");
+      io.to(oldPartnerId).emit("partner-left", {
+        reason: "Partner requested new match",
+        timestamp: new Date().toISOString(),
+      });
     }
-
     const waitingPartnerId = connectionManager.getNextWaitingUser();
     if (waitingPartnerId) {
       const roomId = connectionManager.createPartnership(
         socket.id,
         waitingPartnerId
       );
-
+      const matchData = {
+        timestamp: new Date().toISOString(),
+        roomId,
+        matchId: `${socket.id.slice(0, 4)}-${waitingPartnerId.slice(0, 4)}`,
+      };
+      // The waiting user becomes the initiator
       socket.emit("match", {
+        ...matchData,
         peerId: waitingPartnerId,
-        isInitiator: false,
+        isInitiator: false, // This user is the receiver
       });
-
       io.to(waitingPartnerId).emit("match", {
+        ...matchData,
         peerId: socket.id,
-        isInitiator: true,
+        isInitiator: true, // Waiting user becomes initiator
       });
-
       logEvent("match-created", socket.id, {
         partnerId: waitingPartnerId,
         roomId,
+        initiator: waitingPartnerId, // Log who is the initiator
       });
     } else {
       connectionManager.addToWaitingQueue(socket.id);
-      socket.emit("waiting");
+      socket.emit("waiting", {
+        position: connectionManager.waitingQueue.length,
+        timestamp: new Date().toISOString(),
+      });
     }
-
-    io.emit("stats-update", connectionManager.getStats());
+    io.emit("stats-update", connectionManager.getConnectionStats());
   });
-
   socket.on("offer", ({ peerId, offer, fromPeerId }) => {
-    logEvent("offer", socket.id, { toPeer: peerId });
-    io.to(peerId).emit("offer", { offer, fromPeerId: socket.id });
-  });
+    console.log(`Forwarding offer from ${fromPeerId} to ${peerId}`);
 
+    io.to(peerId).emit("offer", { offer, fromPeerId });
+  });
   socket.on("answer", ({ peerId, answer, fromPeerId }) => {
-    logEvent("answer", socket.id, { toPeer: peerId });
-    io.to(peerId).emit("answer", { answer, fromPeerId: socket.id });
+    console.log(`Forwarding answer from ${fromPeerId} to ${peerId}`);
+
+    io.to(peerId).emit("answer", { answer, fromPeerId });
   });
 
   socket.on("ice-candidate", ({ peerId, candidate, fromPeerId }) => {
-    const room = connectionManager.findRoomByPeerId(peerId);
+    console.log(`Forwarding ICE candidate from ${fromPeerId} to ${peerId}`);
+
+    const room = connectionManager.findRoomByPeerId(fromPeerId);
+
     if (!room) {
-      console.warn(`No room found for peer ${peerId}`);
+      console.log(`Room not found for peer ${fromPeerId}`);
       return;
     }
 
     const otherPeer = room.participants.find((p) => p !== fromPeerId);
+
     if (!otherPeer) {
-      console.warn(`No other peer found in room for ${fromPeerId}`);
+      console.log(`Other peer not found in room for ${fromPeerId}`);
       return;
     }
 
@@ -135,18 +263,78 @@ io.on("connection", (socket) => {
       fromPeerId,
     });
   });
+  socket.on("chat-message", (message) => {
+    logEvent("chat-message", socket.id, { message });
+    const partnerId = connectionManager.partnerships.get(socket.id);
+    if (partnerId) {
+      io.to(partnerId).emit("chat-message", {
+        text: message.text,
+        sender: socket.id,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
 
   socket.on("disconnect", (reason) => {
-    logEvent("disconnect", socket.id, { reason });
+    logEvent("disconnect", socket.id);
+    console.log(`Socket ${socket.id} disconnected. Reason: ${reason}`);
 
     const partnerId = connectionManager.breakPartnership(socket.id);
     if (partnerId) {
-      io.to(partnerId).emit("partner-left");
+      io.to(partnerId).emit("partner-left", {
+        reason: "Partner disconnected",
+        timestamp: new Date().toISOString(),
+      });
     }
 
     connectionManager.removeUser(socket.id);
-    io.emit("stats-update", connectionManager.getStats());
+    io.emit("stats-update", connectionManager.getConnectionStats());
   });
+});
+
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    stats: connectionManager.getConnectionStats(),
+  });
+});
+// Add this before your server.listen()
+server.on("upgrade", (request, socket, head) => {
+  socket.on("error", (err) => {
+    console.error("Socket upgrade error:", err);
+  });
+});
+
+// Adding  WebSocket specific logging
+io.engine.on("connection_error", (err) => {
+  console.error("Connection error:", err);
+});
+app.get("/socket-test", (req, res) => {
+  res.send(`
+    <html>
+      <body>
+        <h1>WebSocket Test</h1>
+        <div id="status">Connecting...</div>
+        <script src="/socket.io/socket.io.js"></script>
+        <script>
+          const socket = io({
+            transports: ['websocket'],
+            upgrade: false
+          });
+          
+          socket.on('connect', () => {
+            document.getElementById('status').textContent = 'Connected!';
+          });
+          
+          socket.on('connect_error', (error) => {
+            document.getElementById('status').textContent = 'Error: ' + error;
+          });
+        </script>
+      </body>
+    </html>
+  `);
 });
 process.on("uncaughtException", (error) => {
   console.error("Uncaught Exception:", error);
