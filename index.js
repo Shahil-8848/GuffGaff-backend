@@ -102,12 +102,18 @@ class ConnectionManager {
     return false;
   }
 
+  getNextWaitingUser() {
+    if (this.waitingQueue.length > 0) {
+      return this.waitingQueue.shift();
+    }
+    return null;
+  }
+
   createPartnership(socket1Id, socket2Id) {
     const roomId = `room_${++this.roomCounter}`;
     this.partnerships.set(socket1Id, socket2Id);
     this.partnerships.set(socket2Id, socket1Id);
 
-    // Store room information
     this.rooms.set(roomId, {
       participants: [socket1Id, socket2Id],
       createdAt: new Date().toISOString(),
