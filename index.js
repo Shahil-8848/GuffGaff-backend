@@ -50,27 +50,29 @@ app.use(limiter);
 const io = new Server(server, {
   cors: corsOptions,
   transports: ["websocket", "polling"],
-  allowEIO3: true, // Enable compatibility mode
+  allowEIO3: true,
   pingTimeout: 60000,
   pingInterval: 25000,
   path: "/socket.io",
 });
 
-// Connection Manager
+// Connection Manager Class
 class ConnectionManager {
   constructor() {
     this.users = new Map();
     this.partnerships = new Map();
     this.waitingQueue = [];
     this.roomCounter = 0;
+    this.rooms = new Map();
   }
 
-  addUser(socketId) {
+  addUser(socketId, userId) {
     this.users.set(socketId, {
+      userId,
       inCall: false,
+      room: null,
       connectedAt: new Date().toISOString(),
       lastActive: new Date().toISOString(),
-      room: null,
     });
   }
 
@@ -105,6 +107,12 @@ class ConnectionManager {
     this.partnerships.set(socket1Id, socket2Id);
     this.partnerships.set(socket2Id, socket1Id);
 
+    // Store room information
+    this.rooms.set(roomId, {
+      participants: [socket1Id, socket2Id],
+      createdAt: new Date().toISOString(),
+    });
+
     const user1 = this.users.get(socket1Id);
     const user2 = this.users.get(socket2Id);
 
@@ -118,42 +126,39 @@ class ConnectionManager {
     return roomId;
   }
 
+  findRoomByPeerId(peerId) {
+    for (const [roomId, room] of this.rooms) {
+      if (room.participants.includes(peerId)) {
+        return { roomId, participants: room.participants };
+      }
+    }
+    return null;
+  }
+
   breakPartnership(socketId) {
     const partnerId = this.partnerships.get(socketId);
     if (partnerId) {
-      const partnerUser = this.users.get(partnerId);
       const user = this.users.get(socketId);
-      if (partnerUser) {
-        partnerUser.inCall = false;
-        partnerUser.room = null;
+      const partnerUser = this.users.get(partnerId);
+
+      if (user && user.room) {
+        this.rooms.delete(user.room);
       }
+
       if (user) {
         user.inCall = false;
         user.room = null;
       }
-      this.partnerships.delete(partnerId);
+      if (partnerUser) {
+        partnerUser.inCall = false;
+        partnerUser.room = null;
+      }
+
       this.partnerships.delete(socketId);
+      this.partnerships.delete(partnerId);
       return partnerId;
     }
     return null;
-    // console.log()
-  }
-
-  getNextWaitingUser() {
-    while (this.waitingQueue.length > 0) {
-      const nextId = this.waitingQueue.shift();
-      if (this.users.has(nextId) && !this.partnerships.has(nextId)) {
-        return nextId;
-      }
-    }
-    return null;
-  }
-
-  updateUserActivity(socketId) {
-    const user = this.users.get(socketId);
-    if (user) {
-      user.lastActive = new Date().toISOString();
-    }
   }
 
   getConnectionStats() {
@@ -162,6 +167,13 @@ class ConnectionManager {
       waitingUsers: this.waitingQueue.length,
       activePartnerships: this.partnerships.size / 2,
     };
+  }
+
+  updateUserActivity(socketId) {
+    const user = this.users.get(socketId);
+    if (user) {
+      user.lastActive = new Date().toISOString();
+    }
   }
 }
 
@@ -181,10 +193,6 @@ io.on("connection", (socket) => {
   connectionManager.addUser(socket.id);
   io.emit("stats-update", connectionManager.getConnectionStats());
 
-  socket.on("error", (error) => {
-    console.error(`Socket ${socket.id} error:`, error);
-  });
-
   socket.on("find-match", () => {
     logEvent("find-match", socket.id);
     const oldPartnerId = connectionManager.breakPartnership(socket.id);
@@ -194,6 +202,7 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString(),
       });
     }
+
     const waitingPartnerId = connectionManager.getNextWaitingUser();
     if (waitingPartnerId) {
       const roomId = connectionManager.createPartnership(
@@ -205,21 +214,22 @@ io.on("connection", (socket) => {
         roomId,
         matchId: `${socket.id.slice(0, 4)}-${waitingPartnerId.slice(0, 4)}`,
       };
-      // The waiting user becomes the initiator
+
       socket.emit("match", {
         ...matchData,
         peerId: waitingPartnerId,
-        isInitiator: false, // This user is the receiver
+        isInitiator: false,
       });
       io.to(waitingPartnerId).emit("match", {
         ...matchData,
         peerId: socket.id,
-        isInitiator: true, // Waiting user becomes initiator
+        isInitiator: true,
       });
+
       logEvent("match-created", socket.id, {
         partnerId: waitingPartnerId,
         roomId,
-        initiator: waitingPartnerId, // Log who is the initiator
+        initiator: waitingPartnerId,
       });
     } else {
       connectionManager.addToWaitingQueue(socket.id);
@@ -230,20 +240,19 @@ io.on("connection", (socket) => {
     }
     io.emit("stats-update", connectionManager.getConnectionStats());
   });
+
   socket.on("offer", ({ peerId, offer, fromPeerId }) => {
     console.log(`Forwarding offer from ${fromPeerId} to ${peerId}`);
-
     io.to(peerId).emit("offer", { offer, fromPeerId });
   });
+
   socket.on("answer", ({ peerId, answer, fromPeerId }) => {
     console.log(`Forwarding answer from ${fromPeerId} to ${peerId}`);
-
     io.to(peerId).emit("answer", { answer, fromPeerId });
   });
 
   socket.on("ice-candidate", ({ peerId, candidate, fromPeerId }) => {
     console.log(`Forwarding ICE candidate from ${fromPeerId} to ${peerId}`);
-
     const room = connectionManager.findRoomByPeerId(fromPeerId);
 
     if (!room) {
@@ -252,7 +261,6 @@ io.on("connection", (socket) => {
     }
 
     const otherPeer = room.participants.find((p) => p !== fromPeerId);
-
     if (!otherPeer) {
       console.log(`Other peer not found in room for ${fromPeerId}`);
       return;
@@ -262,17 +270,6 @@ io.on("connection", (socket) => {
       candidate,
       fromPeerId,
     });
-  });
-  socket.on("chat-message", (message) => {
-    logEvent("chat-message", socket.id, { message });
-    const partnerId = connectionManager.partnerships.get(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit("chat-message", {
-        text: message.text,
-        sender: socket.id,
-        timestamp: new Date().toISOString(),
-      });
-    }
   });
 
   socket.on("disconnect", (reason) => {
@@ -300,51 +297,19 @@ app.get("/health", (req, res) => {
     stats: connectionManager.getConnectionStats(),
   });
 });
-// Add this before your server.listen()
+
+// WebSocket specific error handling
 server.on("upgrade", (request, socket, head) => {
   socket.on("error", (err) => {
     console.error("Socket upgrade error:", err);
   });
 });
 
-// Adding  WebSocket specific logging
 io.engine.on("connection_error", (err) => {
   console.error("Connection error:", err);
 });
-app.get("/socket-test", (req, res) => {
-  res.send(`
-    <html>
-      <body>
-        <h1>WebSocket Test</h1>
-        <div id="status">Connecting...</div>
-        <script src="/socket.io/socket.io.js"></script>
-        <script>
-          const socket = io({
-            transports: ['websocket'],
-            upgrade: false
-          });
-          
-          socket.on('connect', () => {
-            document.getElementById('status').textContent = 'Connected!';
-          });
-          
-          socket.on('connect_error', (error) => {
-            document.getElementById('status').textContent = 'Error: ' + error;
-          });
-        </script>
-      </body>
-    </html>
-  `);
-});
-process.on("uncaughtException", (error) => {
-  console.error("Uncaught Exception:", error);
-  // Log the error and continue running the server
-});
 
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("Unhandled Rejection at:", promise, "reason:", reason);
-  // Log the error and continue running the server
-});
+// CORS middleware
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -355,6 +320,7 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Credentials", "true");
   next();
 });
+
 // Start server
 server.listen(PORT, () => {
   console.log(`
@@ -365,15 +331,13 @@ server.listen(PORT, () => {
   `);
 });
 
-// Global error handler for uncaught exceptions
+// Global error handlers
 process.on("uncaughtException", (error) => {
   console.error("Uncaught Exception:", error);
-  // Optionally, you can gracefully shut down your server here
 });
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
-  // Optionally, you can gracefully shut down your server here
 });
 
 module.exports = { app, server, io };
