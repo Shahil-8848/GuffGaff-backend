@@ -13,20 +13,16 @@ const {
   RATE_LIMIT_MAX,
   corsOptions,
   socketOptions,
-} = require("./src/server/config/serverConfig");
+} = require("./server/config/serverConfig");
 
-const {
-  ConnectionManager,
-} = require("./src/server/services/ConnectionManager");
+const { ConnectionManager } = require("./server/services/ConnectionManager");
 const {
   setupMatchmakingHandlers,
-} = require("./src/server/socketHandlers/matchmakingHandler");
+} = require("/server/socketHandlers/matchmakingHandler");
 const {
   setupWebRTCHandlers,
-} = require("./src/server/socketHandlers/webRTCHandler");
-const {
-  setupChatHandlers,
-} = require("./src/server/socketHandlers/chatHandler");
+} = require("./server/socketHandlers/webRTCHandler");
+const { setupChatHandlers } = require("./server/socketHandlers/chatHandler");
 
 // Initialize Express app and HTTP server
 const app = express();
