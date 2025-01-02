@@ -15,7 +15,9 @@ const {
   socketOptions,
 } = require("./server/config/serverConfig");
 
-const { ConnectionManager } = require("./server/services/ConnectionManager");
+const {
+  ConnectionManager,
+} = require("./server/ConnectionState/ConnectionManager");
 const {
   setupMatchmakingHandlers,
 } = require("/server/socketHandlers/matchmakingHandler");
