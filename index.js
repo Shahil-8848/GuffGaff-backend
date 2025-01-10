@@ -4,7 +4,7 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
-const { setupTextChatServer } = require("./textChat/textChatServer");
+const { setupTextChatServer } = require("./server/textChat/textChatServer");
 // Environment variables with defaults
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN
@@ -255,6 +255,7 @@ const io = new Server(server, {
   connectTimeout: 45000,
   maxHttpBufferSize: 1e6,
 });
+
 // Initialize connection manager
 const connectionManager = new ConnectionManager();
 
