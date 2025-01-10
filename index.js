@@ -4,7 +4,7 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
-
+const { setupTextChatServer } = require("./textChat/textChatServer");
 // Environment variables with defaults
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN
@@ -235,10 +235,7 @@ class ConnectionManager {
     }
     return false;
   }
-  //added method getUser data
-  getUserData(socketId) {
-    return this.users.get(socketId);
-  }
+
   getConnectionStats() {
     return {
       totalUsers: this.users.size,
@@ -254,24 +251,18 @@ const io = new Server(server, {
   transports: ["websocket"],
   pingTimeout: 60000,
   pingInterval: 25000,
-  path: "/socket.io",
+  path: "/video-chat",
   connectTimeout: 45000,
   maxHttpBufferSize: 1e6,
 });
-
 // Initialize connection manager
 const connectionManager = new ConnectionManager();
 
 // Socket connection handling
 io.on("connection", (socket) => {
   console.log(`[${new Date().toISOString()}] New connection: ${socket.id}`);
-  const userData = {
-    socketId: socket.id,
-    firestoreId: socket.handshake.query.firestoreId,
-    userName: socket.handshake.query.userName,
-    userPhoto: socket.handshake.query.userPhoto,
-  };
-  connectionManager.addUser(socket.id, userData);
+
+  connectionManager.addUser(socket.id);
   io.emit("stats-update", connectionManager.getConnectionStats());
 
   // Handle find match requests
@@ -287,7 +278,6 @@ io.on("connection", (socket) => {
         socket.id,
         waitingPartnerId
       );
-      const partnerData = connectionManager.getUserData(waitingPartnerId);
 
       if (!roomId) {
         socket.emit("error", { message: "Failed to create partnership" });
@@ -304,14 +294,12 @@ io.on("connection", (socket) => {
         ...matchData,
         peerId: waitingPartnerId,
         isInitiator: true,
-        peerFirestoreId: partnerData.firestoreId,
       });
 
       io.to(waitingPartnerId).emit("match", {
         ...matchData,
         peerId: socket.id,
         isInitiator: false,
-        peerFirestoreId: userData.firestoreId,
       });
 
       console.log(
@@ -438,6 +426,8 @@ io.engine.on("connection_error", (err) => {
   console.error(`[${new Date().toISOString()}] Connection error:`, err);
 });
 
+// Setup text chat server
+const textChatIo = setupTextChatServer(server);
 // Start server
 server.listen(PORT, () => {
   console.log(`
