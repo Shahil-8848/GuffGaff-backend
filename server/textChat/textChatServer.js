@@ -103,4 +103,4 @@ function setupTextChatServer(server) {
   });
   return io;
 }
-module.exports = setupTextChatServer;
+module.exports = { setupTextChatServer };
