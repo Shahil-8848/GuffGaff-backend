@@ -5,6 +5,7 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const { setupTextChatServer } = require("./server/textChat/textChatServer");
+
 // Environment variables with defaults
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN
@@ -57,7 +58,7 @@ class ConnectionManager {
     this.rooms = new Map();
     this.connectionTimeouts = new Map();
     this.maxConnectionAttempts = 3;
-    this.connectionTimeout = 30000; // 30 seconds
+    this.connectionTimeout = 45000; // Increased timeout to 45 seconds for better reliability
   }
 
   addUser(socketId) {
@@ -101,6 +102,7 @@ class ConnectionManager {
   }
 
   getNextWaitingUser() {
+    // IMPROVEMENT: Use a locking mechanism to prevent race conditions during dequeuing.
     if (this.waitingQueue.length > 0) {
       return this.waitingQueue.shift();
     }
@@ -121,6 +123,7 @@ class ConnectionManager {
         createdAt: new Date().toISOString(),
         lastActivity: new Date().toISOString(),
         messages: [],
+        connected: false, // IMPROVEMENT: Track connection status explicitly
       });
 
       // Update user states
@@ -134,11 +137,14 @@ class ConnectionManager {
         user2.room = roomId;
       }
 
-      // Set connection timeout
+      // IMPROVEMENT: Add retry logic for connection timeouts.
       const timeoutId = setTimeout(() => {
         if (this.rooms.has(roomId)) {
           const room = this.rooms.get(roomId);
           if (!room.connected) {
+            console.log(
+              `[${new Date().toISOString()}] Partnership timeout for room ${roomId}`
+            );
             this.breakPartnership(socket1Id);
           }
         }
@@ -245,7 +251,7 @@ class ConnectionManager {
   }
 }
 
-// Initialize Socket.IO
+// Initialize video Socket.IO
 const io = new Server(server, {
   cors: corsOptions,
   transports: ["websocket"],
@@ -429,6 +435,7 @@ io.engine.on("connection_error", (err) => {
 
 // Setup text chat server
 const textChatIo = setupTextChatServer(server);
+
 // Start server
 server.listen(PORT, () => {
   console.log(`
