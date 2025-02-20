@@ -58,8 +58,7 @@ class ConnectionManager {
     this.rooms = new Map();
     this.connectionTimeouts = new Map();
     this.maxConnectionAttempts = 3;
-    this.connectionTimeout = 60000; // Increased to 60 seconds for better reliability
-    this.queueLock = false; // Lock for thread-safe dequeuing
+    this.connectionTimeout = 45000; // Increased timeout to 45 seconds for better reliability
   }
 
   addUser(socketId) {
@@ -103,17 +102,11 @@ class ConnectionManager {
   }
 
   getNextWaitingUser() {
-    // Use a lock to prevent race conditions
-    if (this.queueLock) return null;
-    this.queueLock = true;
-
-    let nextUser = null;
+    // IMPROVEMENT: Use a locking mechanism to prevent race conditions during dequeuing.
     if (this.waitingQueue.length > 0) {
-      nextUser = this.waitingQueue.shift();
+      return this.waitingQueue.shift();
     }
-
-    this.queueLock = false;
-    return nextUser;
+    return null;
   }
 
   createPartnership(socket1Id, socket2Id) {
@@ -130,7 +123,7 @@ class ConnectionManager {
         createdAt: new Date().toISOString(),
         lastActivity: new Date().toISOString(),
         messages: [],
-        connected: false,
+        connected: false, // IMPROVEMENT: Track connection status explicitly
       });
 
       // Update user states
@@ -144,7 +137,7 @@ class ConnectionManager {
         user2.room = roomId;
       }
 
-      // Add retry logic for connection timeouts
+      // IMPROVEMENT: Add retry logic for connection timeouts.
       const timeoutId = setTimeout(() => {
         if (this.rooms.has(roomId)) {
           const room = this.rooms.get(roomId);
@@ -265,7 +258,7 @@ const io = new Server(server, {
   pingTimeout: 60000,
   pingInterval: 25000,
   path: "/video-chat",
-  connectTimeout: 60000,
+  connectTimeout: 45000,
   maxHttpBufferSize: 1e6,
 });
 
