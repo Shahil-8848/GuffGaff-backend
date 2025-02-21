@@ -5,7 +5,7 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const { setupTextChatServer } = require("./server/textChat/textChatServer");
-
+const twilio = require("twilio");
 // Environment variables with defaults
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN
@@ -16,6 +16,13 @@ const RATE_LIMIT_WINDOW =
   parseInt(process.env.RATE_LIMIT_WINDOW) || 15 * 60 * 1000;
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 100;
 
+// Initialize Twilio client with your credentials
+const accountSid = process.env.TWILIO_ACCOUNT_SID;
+const authToken = process.env.TWILIO_AUTH_TOKEN;
+if (!accountSid || !authToken) {
+  throw new Error("Twilio credentials not set in environment variables");
+}
+const twilioClient = twilio(accountSid, authToken);
 // Initialize Express app and HTTP server
 const app = express();
 const server = http.createServer(app);
@@ -427,7 +434,16 @@ app.get("/health", (req, res) => {
     environment: NODE_ENV,
   });
 });
-
+//ice servers
+app.get("/api/ice-servers", async (req, res) => {
+  try {
+    const token = await twilioClient.tokens.create();
+    res.json(token.iceServers);
+  } catch (error) {
+    console.error("[Twilio] Error fetching ICE servers:", error);
+    res.status(500).json({ error: "Failed to fetch ICE servers" });
+  }
+});
 // Error handling for WebSocket upgrades
 server.on("upgrade", (request, socket, head) => {
   socket.on("error", (err) => {
