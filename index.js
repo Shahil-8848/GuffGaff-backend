@@ -15,15 +15,18 @@ const RATE_LIMIT_WINDOW =
   parseInt(process.env.RATE_LIMIT_WINDOW) || 15 * 60 * 1000;
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 100;
 
+// Define CORS options
+const corsOptions = {
+  origin: NODE_ENV === "production" ? CORS_ORIGIN : "*",
+  methods: ["GET", "POST"],
+  credentials: true,
+};
+
 // Initialize app and server
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: NODE_ENV === "production" ? CORS_ORIGIN : "*",
-    methods: ["GET", "POST"],
-    credentials: true,
-  },
+  cors: corsOptions, // Apply CORS to Socket.IO
   transports: ["websocket"],
   pingTimeout: 60000,
   pingInterval: 25000,
@@ -36,7 +39,7 @@ app.use(
   helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false })
 );
 app.set("trust proxy", "loopback");
-app.use(cors(io.options.cors));
+app.use(cors(corsOptions)); // Apply CORS to Express
 app.use(rateLimit({ windowMs: RATE_LIMIT_WINDOW, max: RATE_LIMIT_MAX }));
 
 // Connection Manager Class
@@ -102,7 +105,9 @@ class ConnectionManager {
       if (!socket1 || !socket2)
         throw new Error("One or both sockets disconnected");
 
-      const roomId = `room_${Date.now()}_${++this.roomCounter}`;
+      const roomId = `room_${Date.now()}_${Math.random()
+        .toString(36)
+        .substr(2, 5)}`;
       this.partnerships.set(socket1Id, socket2Id);
       this.partnerships.set(socket2Id, socket1Id);
       this.rooms.set(roomId, {
