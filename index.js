@@ -5,7 +5,7 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const { setupTextChatServer } = require("./server/textChat/textChatServer");
-const twilio = require("twilio");
+
 // Environment variables with defaults
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN
