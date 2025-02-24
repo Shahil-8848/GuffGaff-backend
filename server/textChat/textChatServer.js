@@ -96,7 +96,7 @@ function setupTextChatServer(server) {
       });
 
       socket.on("disconnect", () => {
-        console.log(`[TextChat] Disconnection: ${socket.id}`);
+        console.log(`[TextChat] Disconnection happened: ${socket.id}`);
 
         const partnerId = connectionManager.breakMatch(socket.id);
         if (partnerId) {
@@ -110,7 +110,7 @@ function setupTextChatServer(server) {
         io.emit("stats-update", connectionManager.getStats());
       });
     } catch (error) {
-      console.error("[TextChat] Error in connection handler:", error);
+      console.error("[TextChat] Error in connection handlers:", error);
       socket.emit("error", { message: "Internal server error" });
     }
   });
