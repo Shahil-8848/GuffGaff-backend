@@ -52,8 +52,9 @@ app.use(
 // Xirsys ICE Servers Endpoint
 app.get("/ice-servers", async (req, res) => {
   try {
+    const body = JSON.stringify({ format: "urls" });
     const response = await fetch("https://global.xirsys.net/_turn/GuffGaff", {
-      method: "POST",
+      method: "PUT", // Changed to PUT per Xirsys example
       headers: {
         Authorization:
           "Basic " +
@@ -61,19 +62,30 @@ app.get("/ice-servers", async (req, res) => {
             "base64"
           ),
         "Content-Type": "application/json",
+        "Content-Length": body.length, // Added per Xirsys example
       },
+      body: body, // Added body with format: "urls"
     });
+
     const data = await response.json();
+    console.log(
+      `[${new Date().toISOString()}] Xirsys response:`,
+      JSON.stringify(data, null, 2)
+    );
+
     if (data.s !== "ok") {
       throw new Error("Xirsys API error: " + (data.e || "Unknown error"));
     }
+
     res.json(data.v.iceServers);
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Xirsys fetch error:`, error);
+    console.error(
+      `[${new Date().toISOString()}] Xirsys fetch error:`,
+      error.message
+    );
     res.status(500).json({ error: "Failed to fetch ICE servers" });
   }
 });
-
 // Connection Manager Class
 class ConnectionManager {
   constructor() {
