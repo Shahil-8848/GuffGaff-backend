@@ -69,7 +69,7 @@ app.get("/ice-servers", async (req, res) => {
 
     const data = await response.json();
     console.log(
-      `[${new Date().toISOString()}] Xirsys response:`,
+      `[${new Date().toISOString()}] Xirsys response straight to the client`,
       JSON.stringify(data, null, 2)
     );
 
