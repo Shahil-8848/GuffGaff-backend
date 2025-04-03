@@ -448,7 +448,7 @@ const textChatIo = setupTextChatServer(server);
 // Start server
 server.listen(PORT, () => {
   console.log(`
-🚀 Server Status:
+🚀 Server Status rnning:
 - Environment: ${NODE_ENV}
 - Port: ${PORT}
 - WebSocket: Ready
@@ -463,7 +463,7 @@ process.on("uncaughtException", (error) => {
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error(
-    `[${new Date().toISOString()}] Unhandled Rejection at:`,
+    `[${new Date().toISOString()}] Unhandleed Rejection at:`,
     promise,
     "reason:",
     reason
