@@ -451,7 +451,7 @@ server.listen(PORT, () => {
 🚀 Server Status rnning:
 - Environment: ${NODE_ENV}
 - Port: ${PORT}
-- WebSocket: Ready
+- WebSocket: Ready ok 
 - Cors Origin: ${CORS_ORIGIN}
   `);
 });
